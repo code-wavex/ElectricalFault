@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: fault-detection
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && python train.py
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SECRET_KEY
+        generateValue: true
+      - key: NODE_KEY
+        generateValue: true
+      - key: MONGO_URI
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: OFFICER_PASSWORD
+        sync: false
+      - key: RESIDENT_PASSWORD
+        sync: false
