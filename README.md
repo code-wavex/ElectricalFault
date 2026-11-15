@@ -21,3 +21,7 @@ Before deploying set SECRET_KEY, NODE_KEY and MONGO_URI environment variables.
    SECRET_KEY and NODE_KEY are generated for you (read NODE_KEY in the Render dashboard to configure sensor nodes).
 4. Open the Render URL. Sensor nodes POST to https://<your-url>/api/predict with header X-Node-Key.
 Free instances sleep when idle: open the site a few minutes before a presentation.
+
+## Sensor node and SMS
+- `python sensor_node.py --url https://YOUR-APP.onrender.com --key NODE_KEY --node kanyama-01` sends readings like a real node (needs only `pip install requests`). `--once earth_fault` sends a single fault for demos.
+- SMS uses Africa's Talking. Set AT_USERNAME=sandbox, AT_API_KEY (from the sandbox app) and ALERT_PHONE (a number registered as a simulator number in the sandbox). Sandbox messages appear in the Africa's Talking simulator, not on real phones. Without these variables SMS is only logged. Admin > SMS log lists every attempt.

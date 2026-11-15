@@ -10,7 +10,7 @@ const FAULTS = {
 const STATUS = { new: "New", dispatched: "Dispatched", in_progress: "In progress", resolved: "Resolved" }, STEPS = Object.keys(STATUS);
 const NEXT = { new: ["dispatched", "Dispatch crew"], dispatched: ["in_progress", "Start work"], in_progress: ["resolved", "Mark resolved"] };
 const PORTALS = [["resident", "Resident"], ["safety_officer", "Officer"], ["administrator", "Admin"]];
-const TABS = { resident: [["home", "My faults"], ["report", "Report fault"]], safety_officer: [["board", "Triage board"], ["live", "Live sensors"]], administrator: [["overview", "Overview"], ["live", "Live sensors"], ["users", "Users"]] };
+const TABS = { resident: [["home", "My faults"], ["report", "Report fault"]], safety_officer: [["board", "Triage board"], ["live", "Live sensors"]], administrator: [["overview", "Overview"], ["live", "Live sensors"], ["users", "Users"], ["sms", "SMS log"]] };
 const rank = t => ({ critical: 0, high: 1, medium: 2 })[FAULTS[t.fault]?.sev] ?? 3;
 const dur = m => m == null ? "–" : m < 60 ? m + " min" : Math.floor(m / 60) + "h " + (m % 60) + "m";
 const saved = () => { try { return JSON.parse(sessionStorage.getItem("fds")); } catch { return null; } };
@@ -90,14 +90,14 @@ function Home({ tickets, go }) {
 }
 
 function Wizard({ token, done, back }) {
-  const [step, setStep] = useState(1), [f, setF] = useState({ fault: "", zone: "Kanyama", house: "", description: "" }), [err, setErr] = useState(""), [ticket, setTicket] = useState(null);
+  const [step, setStep] = useState(1), [f, setF] = useState({ fault: "", zone: "Kanyama", house: "", phone: "", description: "" }), [err, setErr] = useState(""), [ticket, setTicket] = useState(null);
   const set = k => e => setF({ ...f, [k]: e.target.value });
   async function submit() {
     if (!f.house.trim()) return setErr("Please enter your house number.");
     const r = await call("tickets", token, "POST", f);
     if (!r.ok) return setErr(r.data.error || "Could not send report"); setTicket(r.data); setStep(3); done();
   }
-  const reset = () => { setF({ fault: "", zone: "Kanyama", house: "", description: "" }); setErr(""); setStep(1); };
+  const reset = () => { setF({ fault: "", zone: "Kanyama", house: "", phone: "", description: "" }); setErr(""); setStep(1); };
   return <div className="wizard">
     <ol className="steps">{["Fault", "Location", "Done"].map((n, i) => <li key={n} className={step > i ? "on" : ""}><b>{step > i + 1 ? "✓" : i + 1}</b>{n}</li>)}</ol>
     {step === 1 && <><h3>What kind of fault is it?</h3>
@@ -108,11 +108,12 @@ function Wizard({ token, done, back }) {
     {step === 2 && <><h3>Where is it?</h3>
       <div className="zones">{ZONES.map(z => <button key={z} type="button" className={f.zone === z ? "on" : ""} onClick={() => setF({ ...f, zone: z })}>{z}</button>)}</div>
       <label>House number<input value={f.house} onChange={set("house")} maxLength={20} inputMode="numeric" placeholder="e.g. 142" /></label>
+      <label>Phone for SMS updates (optional)<input value={f.phone} onChange={set("phone")} maxLength={16} inputMode="tel" placeholder="e.g. 0971234567" /></label>
       <label>Describe what you see<textarea rows={4} value={f.description} onChange={set("description")} maxLength={500} placeholder="When did it start? Is anyone in danger?" /></label>
       {err && <p className="err" role="alert">{err}</p>}
       <div className="row"><button className="btn ghost" onClick={() => setStep(1)}>Back</button><button className="btn" onClick={submit}>Submit report</button></div></>}
     {step === 3 && ticket && <div className="success"><div className="tick">✓</div><h3>Report received</h3><p className="muted">A field officer will be dispatched. Quote this ticket if you call.</p>
-      <div className="tid">{ticket.id}</div><Badge fault={ticket.fault} /><p className="muted small">{where(ticket)}</p>
+      <div className="tid">{ticket.id}</div><Badge fault={ticket.fault} /><p className="muted small">{where(ticket)}</p>{ticket.phone && <p className="muted small">SMS updates will go to {ticket.phone}</p>}
       <button className="btn wide" onClick={back}>Back to my faults</button><button className="btn ghost wide" onClick={reset}>Report another fault</button></div>}
   </div>;
 }
@@ -178,6 +179,12 @@ function Users({ rows, tickets, token, refresh, me }) {
       <button className="btn">Create account</button>{msg && <p className={msg.ok ? "okmsg" : "err"} role="status">{msg.t}</p>}</form></div>;
 }
 
+function SmsLog({ rows }) {
+  return <div className="card tbl"><table><thead><tr><th>Time</th><th>To</th><th>Message</th><th>Gateway result</th></tr></thead>
+    <tbody>{rows.map(s => <tr key={s.id}><td>{s.time}</td><td>{s.to}</td><td className="wrap">{s.text}</td><td>{s.result}</td></tr>)}</tbody></table>
+    {!rows.length && <Empty text="No SMS sent yet. Alerts for critical faults and ticket updates appear here." />}</div>;
+}
+
 export default function App() {
   const [me, setMe] = useState(saved), [ask, setAsk] = useState(null), [tab, setTab] = useState(null), [sim, setSim] = useState(true), empty = { tickets: [], users: [], stats: null, readings: [] }, [d, setD] = useState(empty);
   const ref = useRef({}); ref.current = { me, tab, sim };
@@ -190,6 +197,7 @@ export default function App() {
     if (live && sm) await call("simulate/" + NODES[Math.floor(Math.random() * NODES.length)], t);
     const jobs = [["tickets", "tickets"]]; if (live) jobs.push(["readings", "readings"]);
     if (m.role === "administrator") jobs.push(["users", "users"], ["stats", "analytics"]);
+    if (m.role === "administrator" && tb === "sms") jobs.push(["sms", "sms"]);
     const next = {}; for (const [k, p] of jobs) { const r = await call(p, t); if (r.status === 401) return out(); if (r.ok) next[k] = r.data; }
     setD(o => ({ ...o, ...next }));
   }, [out]);
@@ -205,6 +213,7 @@ export default function App() {
       {role === "safety_officer" && cur === "board" && <Board tickets={d.tickets} {...R} />}
       {cur === "live" && <Live rows={d.readings} sim={sim} setSim={setSim} {...R} />}
       {role === "administrator" && cur === "overview" && <Overview s={d.stats} tickets={d.tickets} />}
+      {role === "administrator" && cur === "sms" && <SmsLog rows={d.sms || []} />}
       {role === "administrator" && cur === "users" && <Users rows={d.users} tickets={d.tickets} me={me} {...R} />}
     </main>{ask && <SwitchModal role={ask} onAuth={auth} close={() => setAsk(null)} />}</div>;
 }

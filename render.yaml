@@ -20,3 +20,9 @@ services:
         sync: false
       - key: RESIDENT_PASSWORD
         sync: false
+      - key: AT_USERNAME
+        sync: false
+      - key: AT_API_KEY
+        sync: false
+      - key: ALERT_PHONE
+        sync: false

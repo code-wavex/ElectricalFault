@@ -1,4 +1,4 @@
-import os, uuid, random, joblib, numpy as np
+import os, re, uuid, random, threading, requests, joblib, numpy as np
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, request, jsonify, send_from_directory
@@ -22,7 +22,7 @@ if MONGO_URI:
     def fetch(col, flt=None, limit=30): return list(db[col].find(flt or {}, {"_id": 0}).sort("ts", -1).limit(limit))
     def update(col, id_, fields): db[col].update_one({"id": id_}, {"$set": fields})
 else:
-    store = {"readings": [], "alerts": [], "reports": [], "tickets": []}
+    store = {"readings": [], "alerts": [], "reports": [], "tickets": [], "sms": []}
     def save(col, doc): store[col].insert(0, dict(doc))
     def fetch(col, flt=None, limit=30):
         return [d for d in store[col] if all(d.get(k) == v for k, v in (flt or {}).items())][:limit]
@@ -109,8 +109,34 @@ else:
     model = tf.keras.models.load_model("model_nn.keras"); sc = joblib.load("scaler.joblib")
     predict = lambda x: model.predict(sc.transform(x), verbose=0).argmax(1)[0]
 
-def send_sms(number, text):
-    print(f"[SMS -> {number}] {text}")   # replace with Airtel/MTN gateway API
+# ---------- SMS (Africa's Talking: AT_USERNAME=sandbox for testing, your app username for live) ----------
+AT_USER, AT_KEY, ALERT_PHONE = os.getenv("AT_USERNAME"), os.getenv("AT_API_KEY"), os.getenv("ALERT_PHONE")
+AT_BASE = os.getenv("AT_BASE_URL") or ("https://api.sandbox.africastalking.com" if AT_USER == "sandbox" else "https://api.africastalking.com")
+
+def clean_phone(p):
+    p = re.sub(r"[\s\-()]", "", str(p or ""))
+    if re.fullmatch(r"0\d{9}", p): p = "+260" + p[1:]          # 0971234567 -> +260971234567
+    elif re.fullmatch(r"260\d{9}", p): p = "+" + p
+    return p if re.fullmatch(r"\+\d{10,15}", p) else None
+
+def _deliver(number, text):
+    result = "stub (no gateway keys set)"
+    if AT_USER and AT_KEY:
+        try:
+            r = requests.post(AT_BASE + "/version1/messaging", headers={"apiKey": AT_KEY, "Accept": "application/json"},
+                              data={"username": AT_USER, "to": number, "message": text[:300]}, timeout=10)
+            result = f"HTTP {r.status_code}"
+            try: result += ": " + r.json()["SMSMessageData"]["Recipients"][0]["status"]
+            except Exception: pass
+        except Exception as e: result = "failed: " + str(e)[:80]
+    ts = datetime.utcnow().timestamp()
+    save("sms", {"id": uuid.uuid4().hex[:8], "to": number, "text": text, "result": result, "ts": ts, "time": stamp(ts)})
+    print(f"[SMS -> {number}] {text} ({result})")
+
+def send_sms(number, text):  # runs in a thread so a slow gateway never delays the API
+    if number: threading.Thread(target=_deliver, args=(number, text), daemon=True).start()
+
+def notify_staff(text): send_sms(clean_phone(ALERT_PHONE), text)
 
 FAULTS = ["short_circuit", "earth_fault", "overload", "open_circuit"]
 ZONES = ["Kanyama", "Matero"]
@@ -128,6 +154,7 @@ def open_ticket(doc):
     if any(t["status"] != "resolved" for t in live): return
     zone = "Matero" if "matero" in doc["node_id"].lower() else "Kanyama"
     save("tickets", new_ticket(doc["fault"], zone, "", f"Detected by sensor node {doc['node_id']}", "sensor", node_id=doc["node_id"]))
+    notify_staff(f"ALERT {doc['fault'].replace('_', ' ').upper()} detected at {doc['node_id']} ({zone})")  # one SMS per new ticket, not per reading
 
 def classify_and_store(node_id, v, i, leak, pf):
     label = le.inverse_transform([predict(np.array([[v, i, leak, pf]]))])[0]
@@ -137,8 +164,6 @@ def classify_and_store(node_id, v, i, leak, pf):
     if label != "normal":
         save("alerts", {**doc, "id": uuid.uuid4().hex[:8], "status": "open"})
         open_ticket(doc)
-        try: send_sms("+260XXXXXXXXX", f"ALERT {label.upper()} at {node_id}")
-        except Exception as e: print("SMS failed:", e)   # alert is still stored
     return doc
 
 # ---------- Data endpoints ----------
@@ -210,7 +235,11 @@ def api_new_ticket():
     house, desc = str(d.get("house", "")).strip(), str(d.get("description", "")).strip()
     if fault not in FAULTS or zone not in ZONES: return jsonify(error="Choose a fault type and a zone"), 400
     if not house or len(house) > 20 or len(desc) > 500: return jsonify(error="House number required (max 20 chars); description max 500"), 400
-    t = new_ticket(fault, zone, house, desc, "resident", reporter=request.user["username"]); save("tickets", t)
+    raw = str(d.get("phone", "")).strip(); phone = clean_phone(raw) if raw else None
+    if raw and not phone: return jsonify(error="Enter a valid phone number, e.g. 0971234567"), 400
+    t = new_ticket(fault, zone, house, desc, "resident", reporter=request.user["username"]); t["phone"] = phone; save("tickets", t)
+    if phone: send_sms(phone, f"Fault report {t['id']} received. We will update you by SMS.")
+    if fault in ("short_circuit", "earth_fault"): notify_staff(f"New {fault.replace('_', ' ')} report: {zone}, house {house} ({t['id']})")
     return jsonify(t), 201
 
 @app.post("/api/tickets/<tid>/status")
@@ -226,7 +255,10 @@ def api_ticket_status(tid):
     if d.get("assign"): f["assignee"] = request.user["username"]
     note = str(d.get("note", "")).strip()[:300]
     if note: f["notes"] = (t.get("notes") or []) + [dict(by=request.user["username"], text=note, time=now())]
-    update("tickets", tid, f); return jsonify(ok=True)
+    update("tickets", tid, f)
+    if d.get("status") in ("dispatched", "resolved") and t.get("phone"):
+        send_sms(t["phone"], f"Ticket {tid}: " + ("a field officer has been dispatched to you." if d["status"] == "dispatched" else "your fault is marked resolved. Stay safe."))
+    return jsonify(ok=True)
 
 @app.get("/api/analytics")
 @require("administrator")
@@ -240,6 +272,10 @@ def api_analytics():
                    critical_active=sum(t["status"] != "resolved" and t["fault"] in ("short_circuit", "earth_fault") for t in ts),
                    avg_resolution_min=round(sum(mins) / len(mins)) if mins else None, by_type=by,
                    by_status={s: sum(t["status"] == s for t in ts) for s in STATUSES})
+
+@app.get("/api/sms")
+@require("administrator")
+def api_sms(): return jsonify(fetch("sms", limit=100))
 
 @app.delete("/api/users/<uname>")
 @require("administrator")
